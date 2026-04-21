@@ -1,0 +1,266 @@
+name: Windows Build & Release
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ============================================================
+  # LINT - ESLint + TypeScript Check
+  # ============================================================
+  lint:
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Run ESLint
+        run: bun run lint
+
+      - name: TypeScript check
+        run: bunx tsc --noEmit
+
+  # ============================================================
+  # BUILD - Tauri App for Windows (MSI + NSIS + Portable)
+  # ============================================================
+  build:
+    runs-on: windows-latest
+    needs: lint
+    timeout-minutes: 90
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: latest
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      # (C6) Fix: Install CMake — required by llama-cpp-2 to compile llama.cpp C/C++ source
+      - name: Install CMake
+        uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: '3.27'
+
+      # (C5) Fix: Vulkan SDK step REMOVED — llama-native uses CPU only, llama-cuda uses CUDA.
+      # Vulkan was removed from Cargo.toml features. The old Vulkan SDK install step was:
+      # 1. Unnecessary for llama-native (CPU) builds
+      # 2. Broken — LunarG SDK silent install doesn't work on Windows CI
+      # 3. Wasting 2-3 minutes of build time
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          # (C4) Fix: Use explicit Windows paths instead of Unix ~ notation
+          # actions/cache@v4 does NOT perform shell expansion on path strings
+          path: |
+            C:\Users\runneradmin\.cargo\registry
+            C:\Users\runneradmin\.cargo\git
+            src-tauri\target
+          key: ${{ runner.os }}-rust-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-rust-
+
+      - name: Cache Bun dependencies
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lockb') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # (C7/H1) Fix: Removed explicit "bun run build" step.
+      # Tauri's beforeBuildCommand in tauri.conf.json handles the frontend build.
+      # The old workflow built the frontend TWICE and the second build (via beforeBuildCommand)
+      # was missing the NEXT_STATIC_EXPORT env var. Now the env var is set for the entire
+      # tauri build step, and beforeBuildCommand picks it up automatically.
+      - name: Build Tauri app (CPU - llama-native)
+        run: |
+          bun tauri build --target x86_64-pc-windows-msvc --bundles nsis,msi -- --features llama-native
+        env:
+          NODE_ENV: production
+          NEXT_STATIC_EXPORT: "true"
+          TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
+          TAURI_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
+
+      - name: Get version from Cargo.toml
+        id: version
+        shell: pwsh
+        run: |
+          $content = Get-Content src-tauri/Cargo.toml -Raw
+          if ($content -match 'version = "([^"]+)"') {
+            $version = $matches[1]
+            echo "VERSION=$version" >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Find portable exe
+        id: portable
+        shell: pwsh
+        run: |
+          $exePath = Get-ChildItem -Path "src-tauri/target/x86_64-pc-windows-msvc/release" -Filter "*.exe" -Recurse | Where-Object { $_.DirectoryName -notmatch "bundle" } | Select-Object -First 1
+          if ($exePath) {
+            echo "EXE_PATH=$($exePath.FullName)" >> $env:GITHUB_OUTPUT
+            echo "Portable exe found: $($exePath.FullName)"
+          } else {
+            echo "No portable exe found"
+          }
+
+      - name: Upload MSI installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: NexaStory-Windows-MSI-${{ steps.version.outputs.VERSION }}
+          path: src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
+          retention-days: 30
+
+      - name: Upload NSIS installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: NexaStory-Windows-NSIS-${{ steps.version.outputs.VERSION }}
+          path: src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+          retention-days: 30
+
+      - name: Upload portable exe
+        if: steps.portable.outputs.EXE_PATH != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: NexaStory-Windows-Portable-${{ steps.version.outputs.VERSION }}
+          path: ${{ steps.portable.outputs.EXE_PATH }}
+          retention-days: 30
+
+  # ============================================================
+  # RELEASE - Create GitHub Release (only on version tags)
+  # ============================================================
+  release:
+    runs-on: windows-latest
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    timeout-minutes: 15
+
+    steps:
+      # (M2) Fix: Removed unnecessary checkout — release job only downloads artifacts
+      - name: Download MSI artifact
+        uses: actions/download-artifact@v4
+        with:
+          pattern: NexaStory-Windows-MSI-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: Download NSIS artifact
+        uses: actions/download-artifact@v4
+        with:
+          pattern: NexaStory-Windows-NSIS-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: Download portable exe artifact
+        uses: actions/download-artifact@v4
+        with:
+          pattern: NexaStory-Windows-Portable-*
+          path: artifacts
+          merge-multiple: true
+        continue-on-error: true
+
+      - name: Get version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $env:GITHUB_OUTPUT
+        shell: bash
+
+      - name: Determine prerelease status
+        id: prerelease
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          if [[ "$VERSION" == *"-"* ]]; then
+            echo "IS_PRERELEASE=true" >> $env:GITHUB_OUTPUT
+          else
+            echo "IS_PRERELEASE=false" >> $env:GITHUB_OUTPUT
+          fi
+        shell: bash
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: NexaStory v${{ steps.version.outputs.VERSION }}
+          body: |
+            ## 🚀 NexaStory v${{ steps.version.outputs.VERSION }}
+
+            ### 📥 Downloads (Windows Only)
+
+            | File | Description |
+            |------|-------------|
+            | `*.msi` | Windows Installer (recommended) |
+            | `*-setup.exe` | NSIS Installer |
+            | `*.exe` (portable) | Standalone executable |
+
+            ### 💻 System Requirements
+
+            - **OS**: Windows 10/11 (64-bit)
+            - **RAM**: 8GB minimum (16GB recommended)
+            - **CPU**: AVX support required (AVX2 recommended)
+            - **GPU**: Optional - NVIDIA CUDA for GPU acceleration
+
+            ### ✨ Features
+
+            - 🤖 **Local AI Models** - GGUF format, complete privacy, no internet required
+            - ⚡ **Speculative Decoding** - Duo Model for faster generation
+            - 🧠 **CPU Optimizations** - AVX, AVX2, AVX-512, FMA support
+            - 🎮 **GPU Support** - CUDA acceleration for NVIDIA GPUs
+            - 📝 **Creative Writing** - Story editor with project management
+            - 👥 **Character Management** - Create and organize characters
+            - 📍 **Location Tracking** - Manage story locations
+            - 📚 **Lore Notes** - Keep track of world-building details
+            - 💾 **Local Storage** - All data stored locally
+            - 🔄 **Auto-backup** - Automatic backup system
+            - 🎯 **Story Rail** - Guide your story direction
+
+            ### 🔧 Build Info
+
+            - **Target**: x86_64-pc-windows-msvc
+            - **Features**: llama-native (CPU optimizations)
+            - **Installers**: MSI + NSIS
+
+            ### 📝 Changelog
+
+            See [CHANGELOG.md](./CHANGELOG.md) for details.
+
+            ---
+
+            **Built with**: Tauri v2 + Next.js 16 + llama.cpp
+
+          files: artifacts/**/*
+          draft: false
+          prerelease: ${{ steps.prerelease.outputs.IS_PRERELEASE == 'true' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

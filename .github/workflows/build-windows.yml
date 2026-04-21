@@ -1,0 +1,267 @@
+name: Build Windows (NexaStory v0.3.0)
+
+on:
+  push:
+    branches: [main, master, develop]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+    inputs:
+      build_cuda:
+        description: 'Build CUDA variant (NVIDIA GPU)'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      create_release:
+        description: 'Create GitHub Release'
+        required: false
+        default: 'auto'
+        type: choice
+        options:
+          - 'auto'
+          - 'true'
+          - 'false'
+
+# Cancel in-progress builds for the same branch
+concurrency:
+  group: build-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Rust toolchain pinned in rust-toolchain.toml
+  RUST_TOOLCHAIN: '1.85.0'
+  # Bun version
+  BUN_VERSION: '1.2.4'
+  # Node.js version (for Next.js build compatibility)
+  NODE_VERSION: '20'
+  # llama-cpp-2 version — DO NOT CHANGE
+  LLAMA_CPP_VERSION: '0.1.143'
+  # Next.js static export flag for Tauri
+  NEXT_STATIC_EXPORT: 'true'
+
+jobs:
+  # ============================================================================
+  # Job 1: Build CPU variant (llama-native)
+  # ============================================================================
+  build-cpu:
+    name: Build CPU (llama-native)
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: 'src-tauri -> target'
+          key: cpu-windows
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install frontend dependencies
+        run: bun install
+
+      - name: Lint frontend
+        run: bun run lint
+        continue-on-error: false
+
+      - name: Build Tauri app (CPU / llama-native)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEXT_STATIC_EXPORT: ${{ env.NEXT_STATIC_EXPORT }}
+        with:
+          tauriScript: bun run tauri
+          args: >
+            --target x86_64-pc-windows-msvc
+            --bundles nsis,msi
+            -- --features llama-native
+
+      - name: Upload NSIS installer (CPU)
+        uses: actions/upload-artifact@v4
+        with:
+          name: NexaStory-CPU-NSIS
+          path: src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload MSI installer (CPU)
+        uses: actions/upload-artifact@v4
+        with:
+          name: NexaStory-CPU-MSI
+          path: src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
+          if-no-files-found: error
+          retention-days: 30
+
+  # ============================================================================
+  # Job 2: Build CUDA variant (llama-cuda) — requires CUDA Toolkit
+  # ============================================================================
+  build-cuda:
+    name: Build CUDA (llama-cuda / NVIDIA GPU)
+    runs-on: windows-latest
+    timeout-minutes: 90
+    if: >-
+      github.event_name == 'workflow_dispatch' && github.event.inputs.build_cuda == 'true' ||
+      startsWith(github.ref, 'refs/tags/v') ||
+      github.event_name != 'workflow_dispatch'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup CUDA Toolkit
+        id: cuda-toolkit
+        uses: Jimver/cuda-toolkit@v0.2.21
+        with:
+          cuda: '12.6.3'
+          method: 'network'
+          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "curand", "curand_dev"]'
+
+      - name: Verify CUDA installation
+        run: |
+          nvcc --version
+          where nvcc
+          echo "CUDA_PATH=$env:CUDA_PATH"
+          echo "CUDA_PATH_V12_6=$env:CUDA_PATH_V12_6"
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: 'src-tauri -> target'
+          key: cuda-windows
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install frontend dependencies
+        run: bun install
+
+      - name: Build Tauri app (CUDA / llama-cuda)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEXT_STATIC_EXPORT: ${{ env.NEXT_STATIC_EXPORT }}
+          # Ensure CUDA paths are visible to the build
+          CUDA_PATH: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}
+        with:
+          tauriScript: bun run tauri
+          args: >
+            --target x86_64-pc-windows-msvc
+            --bundles nsis,msi
+            -- --features llama-cuda
+
+      - name: Upload NSIS installer (CUDA)
+        uses: actions/upload-artifact@v4
+        with:
+          name: NexaStory-CUDA-NSIS
+          path: src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload MSI installer (CUDA)
+        uses: actions/upload-artifact@v4
+        with:
+          name: NexaStory-CUDA-MSI
+          path: src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
+          if-no-files-found: error
+          retention-days: 30
+
+  # ============================================================================
+  # Job 3: Create GitHub Release (on tag push or manual trigger)
+  # ============================================================================
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [build-cpu, build-cuda]
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.create_release == 'true')
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: false
+
+      - name: List artifacts
+        run: ls -R artifacts/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: NexaStory ${{ github.ref_name }}
+          body: |
+            ## NexaStory v0.3.0 — Windows Desktop Release
+
+            ### Downloads
+            | Variant | Installer | Description |
+            |---------|-----------|-------------|
+            | **CPU** | `.exe` (NSIS) / `.msi` | Intel/AMD — no GPU required |
+            | **CUDA** | `.exe` (NSIS) / `.msi` | NVIDIA GPU required (CUDA 12.x) |
+
+            ### System Requirements
+            - **OS**: Windows 10/11 (x64)
+            - **CPU**: x86_64 with AVX2 support recommended
+            - **RAM**: 8 GB minimum (16 GB+ recommended for larger models)
+            - **GPU (CUDA variant)**: NVIDIA GPU with CUDA Compute 6.0+ and 8+ GB VRAM
+            - **Storage**: 500 MB for app + space for GGUF models
+
+            ### llama.cpp Version
+            Built with `llama-cpp-2` v0.1.143
+
+            ### What's New
+            - Local GGUF model inference via llama.cpp
+            - Speculative decoding (draft + main model)
+            - NVIDIA CUDA acceleration support
+            - World Studio for managing characters and locations
+            - Full offline / privacy-first operation
+          draft: false
+          prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}
+          files: |
+            artifacts/NexaStory-CPU-NSIS/*.exe
+            artifacts/NexaStory-CPU-MSI/*.msi
+            artifacts/NexaStory-CUDA-NSIS/*.exe
+            artifacts/NexaStory-CUDA-MSI/*.msi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
