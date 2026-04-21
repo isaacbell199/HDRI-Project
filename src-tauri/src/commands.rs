@@ -564,7 +564,7 @@ if let Ok(characters) = serde_json::from_value::<Vec<Character>>(data["character
             age: character.age,
             gender: character.gender,
             role: character.role,
-            background: String::new(), // <--- AJOUTEZ CETTE LIGNE
+            background: Some(String::new()),
         };
         if let Err(e) = database::create_character(character_request).await {
             log::warn!("Failed to import character: {}", e);
