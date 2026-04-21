@@ -62,8 +62,9 @@ jobs:
           node-version: '20'
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master  # Changez @stable par @master
         with:
+          toolchain: 1.88.0                  # Ajoutez cette ligne pour forcer la version
           targets: x86_64-pc-windows-msvc
 
       # (C6) Fix: Install CMake — required by llama-cpp-2 to compile llama.cpp C/C++ source
