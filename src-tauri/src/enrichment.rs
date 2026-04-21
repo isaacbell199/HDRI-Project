@@ -489,7 +489,7 @@ fn fix_phrase_repetitions(text: &str) -> String {
     }
 
     // Build n-grams and detect repetitions
-    let mut result = words.clone();
+    let result = words.clone();
     let mut detected_ranges: Vec<(usize, usize)> = Vec::new();
 
     // Check for 2-4 word phrase repetitions
