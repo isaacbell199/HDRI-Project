@@ -556,20 +556,21 @@ pub async fn import_project(filepath: String) -> Result<Project, String> {
     }
 
     // Import characters
-    if let Ok(characters) = serde_json::from_value::<Vec<Character>>(data["characters"].clone()) {
-        for character in characters {
-            let character_request = CreateCharacterRequest {
-                project_id: project_id.clone(),
-                name: character.name,
-                age: character.age,
-                gender: character.gender,
-                role: character.role,
-            };
-            if let Err(e) = database::create_character(character_request).await {
-                log::warn!("Failed to import character: {}", e);
-            }
+if let Ok(characters) = serde_json::from_value::<Vec<Character>>(data["characters"].clone()) {
+    for character in characters {
+        let character_request = CreateCharacterRequest {
+            project_id: project_id.clone(),
+            name: character.name,
+            age: character.age,
+            gender: character.gender,
+            role: character.role,
+            background: String::new(), // <--- AJOUTEZ CETTE LIGNE
+        };
+        if let Err(e) = database::create_character(character_request).await {
+            log::warn!("Failed to import character: {}", e);
         }
     }
+}
 
     // Import locations
     if let Ok(locations) = serde_json::from_value::<Vec<Location>>(data["locations"].clone()) {
