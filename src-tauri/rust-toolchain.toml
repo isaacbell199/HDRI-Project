@@ -1,6 +1,7 @@
-# (C3) Fix: Pin Rust toolchain version for reproducible builds
-# OnceLock (std::sync::OnceLock) requires Rust 1.80+
-# Using 1.85.0 as the minimum guaranteed stable version
 [toolchain]
-channel = "1.85.0"
+# Force l'utilisation de Rust 1.88.0 pour satisfaire les dépendances (serde_with, time, etc.)
+channel = "1.88.0"
+# Ajoute la cible Windows 64-bit pour la compilation
 targets = ["x86_64-pc-windows-msvc"]
+# Installe les composants nécessaires
+components = ["rust-std", "rustc", "cargo"]
